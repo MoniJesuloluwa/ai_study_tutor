@@ -1,0 +1,7 @@
+anthropic>=0.50.0
+python-dotenv
+rich
+streamlit
+PyPDF2
+pandas
+plotly

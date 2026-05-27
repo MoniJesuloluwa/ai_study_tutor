@@ -1,0 +1,17 @@
+# Environment
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Data
+data/progress.json
+data/notes/
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
