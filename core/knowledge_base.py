@@ -2,6 +2,10 @@ from typing import List, Dict
 import re
 
 
+# ~4 chars per token, so 150,000 chars is roughly 37k tokens of notes per request.
+MAX_CONTEXT_CHARS = 150_000
+
+
 class KnowledgeBase:
     """
     Very simple in-memory knowledge base.
@@ -30,7 +34,7 @@ class KnowledgeBase:
                 score += text.count(w)
         return score
 
-    def build_context_for_topic(self, topic: str, max_chars: int = 6000) -> str:
+    def build_context_for_topic(self, topic: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
         """
         Returns a big context string built from the most relevant notes.
         For now: sort notes by naive score, then concatenate until max_chars.

@@ -3,6 +3,8 @@ from typing import List, Dict, Generator
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
+from core.knowledge_base import MAX_CONTEXT_CHARS
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -76,7 +78,7 @@ class Tutor:
         if context.strip():
             blocks.append({
                 "type": "text",
-                "text": f"STUDENT NOTES:\n{context[:6000]}",
+                "text": f"STUDENT NOTES:\n{context[:MAX_CONTEXT_CHARS]}",
                 "cache_control": {"type": "ephemeral"},
             })
         return blocks

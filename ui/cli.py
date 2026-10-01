@@ -4,7 +4,7 @@ from rich.table import Table
 from rich.prompt import Prompt
 
 from core.loader import NotesLoader
-from core.knowledge_base import KnowledgeBase
+from core.knowledge_base import KnowledgeBase, MAX_CONTEXT_CHARS
 from core.tutor import Tutor
 from core.practice import PracticeSession
 import core.progress as progress
@@ -32,7 +32,7 @@ class CLI:
         if not context.strip():
             self.console.print("[yellow]No strongly matching notes for that topic. Using all notes as context.[/]")
             all_text = "\n\n".join(n["content"] for n in notes)
-            return all_text[:6000]
+            return all_text[:MAX_CONTEXT_CHARS]
         return context
 
     # ---------- Explain ----------

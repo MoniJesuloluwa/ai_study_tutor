@@ -2,6 +2,7 @@
 Streamlit dashboard for the AI Study Tutor.
 Run with: streamlit run ui/dashboard.py
 """
+import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -11,7 +12,7 @@ import plotly.express as px
 import pandas as pd
 
 from core.loader import NotesLoader
-from core.knowledge_base import KnowledgeBase
+from core.knowledge_base import KnowledgeBase, MAX_CONTEXT_CHARS
 from core.tutor import Tutor
 from core.practice import PracticeSession
 import core.progress as progress
@@ -34,6 +35,7 @@ def _init_state():
         "topic": "",
         "context": "",
         "notes_loaded": False,
+        "notes_report": None,
         # Explain / Practice
         "chat_history": [],        # [{role, content}]
         "chat_display": [],        # [{role, content}] for display
@@ -72,20 +74,45 @@ def get_tutor() -> Tutor:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def load_notes(folder: str, topic: str) -> str:
-    loader = NotesLoader()
-    kb = KnowledgeBase()
-    try:
-        notes = loader.load_notes_from_folder(folder)
-    except FileNotFoundError:
-        return ""
+@st.cache_data(show_spinner=False)
+def parse_uploads(files: tuple):
+    return NotesLoader().load_notes_from_uploads(files)
+
+
+def uploads_as_tuple(uploads) -> tuple:
+    return tuple((f.name, f.getvalue()) for f in uploads)
+
+
+def load_notes(folder: str, topic: str, uploads=None):
+    """Returns (context, report). A blank topic means use everything loaded."""
+    unreadable = []
+    if uploads:
+        notes, unreadable = parse_uploads(uploads_as_tuple(uploads))
+    else:
+        try:
+            notes = NotesLoader().load_notes_from_folder(folder)
+        except FileNotFoundError:
+            notes = []
+    report = {"read": [n["name"] for n in notes], "unreadable": unreadable, "truncated": False}
     if not notes:
-        return ""
-    kb.load_notes(notes)
-    ctx = kb.build_context_for_topic(topic)
+        return "", report
+
+    ctx = ""
+    if topic.strip():
+        kb = KnowledgeBase()
+        kb.load_notes(notes)
+        ctx = kb.build_context_for_topic(topic)
     if not ctx.strip():
-        return "\n\n".join(n["content"] for n in notes)[:6000]
-    return ctx
+        ctx = "\n\n".join(f"From {n['name']}:\n{n['content'].strip()}" for n in notes)[:MAX_CONTEXT_CHARS]
+    report["truncated"] = len(ctx) >= MAX_CONTEXT_CHARS
+    return ctx, report
+
+
+def topic_label(topic: str, report: dict) -> str:
+    if topic.strip():
+        return topic.strip()
+    label = ", ".join(Path(name).stem for name in report["read"]) or "My notes"
+    return label if len(label) <= 60 else label[:57] + "..."
 
 
 def reset_session():
@@ -108,8 +135,35 @@ with st.sidebar:
     st.title("📚 AI Study Tutor")
     st.divider()
 
-    notes_folder = st.text_input("Notes folder", value="data/notes", key="notes_folder_input")
-    topic = st.text_input("Topic to study", placeholder="e.g. Machine Learning", key="topic_input")
+    api_key_missing = not os.getenv("ANTHROPIC_API_KEY")
+    if api_key_missing:
+        st.error(
+            "Anthropic API key not found. Create a file named `.env` in the project "
+            "folder containing `ANTHROPIC_API_KEY=your-key`, then restart the app."
+        )
+
+    uploaded_files = st.file_uploader(
+        "Upload your notes",
+        type=["pdf", "pptx", "txt", "md"],
+        accept_multiple_files=True,
+        help="PDF, PowerPoint (.pptx), text, or Markdown files.",
+        key="notes_upload",
+    )
+    if uploaded_files:
+        _read, _unreadable = parse_uploads(uploads_as_tuple(uploaded_files))
+        if _read:
+            st.success(f"{len(_read)} file{'s' if len(_read) != 1 else ''} read")
+        if _unreadable:
+            st.warning(
+                "Couldn't read any text from: " + ", ".join(_unreadable)
+                + ". They may be scanned, image-only, or empty."
+            )
+    with st.expander("Or use a notes folder"):
+        notes_folder = st.text_input(
+            "Notes folder", value="data/notes", key="notes_folder_input",
+            help="Used only when no files are uploaded.",
+        )
+    topic = st.text_input("Topic to study", placeholder="Leave blank to study everything uploaded", key="topic_input")
 
     mode = st.radio(
         "Mode",
@@ -119,21 +173,26 @@ with st.sidebar:
 
     num_questions = st.slider("Number of questions / cards", 3, 10, 5)
 
-    start_btn = st.button("▶ Start Session", type="primary", use_container_width=True)
+    can_start = bool(topic.strip()) or bool(uploaded_files)
+    start_btn = st.button(
+        "▶ Start Session", type="primary", use_container_width=True,
+        disabled=api_key_missing or not can_start,
+    )
 
-    if start_btn and topic.strip():
+    if start_btn:
         reset_session()
         with st.spinner("Loading notes..."):
-            ctx = load_notes(notes_folder, topic)
-        st.session_state.topic = topic.strip()
+            ctx, report = load_notes(notes_folder, topic, uploaded_files)
+        st.session_state.topic = topic_label(topic, report)
+        st.session_state.notes_report = report
         st.session_state.context = ctx
         st.session_state.mode = mode
         st.session_state.notes_loaded = True
         st.session_state.session_started = True
         st.rerun()
 
-    if not topic.strip():
-        st.caption("Enter a topic to begin.")
+    if not can_start:
+        st.caption("Enter a topic, or upload notes to study everything in them.")
 
     st.divider()
     if st.button("🔄 Reset", use_container_width=True):
@@ -212,7 +271,7 @@ with tab_progress:
 
 with tab_study:
     if not st.session_state.session_started:
-        st.info("👈 Enter a topic and click **Start Session** to begin.")
+        st.info("👈 Upload your notes, add a topic if you like, then click **Start Session**.")
         st.stop()
 
     topic = st.session_state.topic
@@ -220,8 +279,18 @@ with tab_study:
     mode = st.session_state.mode
 
     st.header(f"{mode}: {topic}")
+    report = st.session_state.notes_report
+    if report and report["read"]:
+        st.caption("Using: " + ", ".join(report["read"]))
+    if report and report["unreadable"]:
+        st.warning("Couldn't read any text from: " + ", ".join(report["unreadable"]))
+    if report and report["truncated"]:
+        st.info(
+            "Your notes are longer than the tutor can read at once, so some text was left out. "
+            "Try uploading fewer files or entering a more specific topic."
+        )
     if not context.strip():
-        st.warning("No notes found for this topic. The tutor will use general knowledge.")
+        st.warning("No readable notes found. The tutor will use general knowledge.")
 
     # -----------------------------------------------------------------------
     # EXPLAIN MODE

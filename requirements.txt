@@ -5,3 +5,4 @@ streamlit
 PyPDF2
 pandas
 plotly
+python-pptx
