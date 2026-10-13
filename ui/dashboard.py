@@ -4,6 +4,7 @@ Run with: streamlit run ui/dashboard.py
 """
 import os
 import sys
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -36,6 +37,7 @@ def _init_state():
         "context": "",
         "notes_loaded": False,
         "notes_report": None,
+        "broad_topic": False,
         # Explain / Practice
         "chat_history": [],        # [{role, content}]
         "chat_display": [],        # [{role, content}] for display
@@ -53,6 +55,11 @@ def _init_state():
         "card_idx": 0,
         "card_flipped": False,
         "card_scores": [],
+        # Mock exam
+        "exam_questions": [],
+        "exam_started_at": None,
+        "exam_minutes": 30,
+        "exam_results": None,
         # General
         "session_started": False,
         "tutor": None,
@@ -121,6 +128,7 @@ def reset_session():
         "quiz_questions", "quiz_idx", "quiz_answers", "quiz_evaluations",
         "quiz_scores", "quiz_done", "flashcards", "card_idx", "card_flipped",
         "card_scores", "session_started",
+        "exam_questions", "exam_started_at", "exam_results",
     ]
     for k in keys:
         del st.session_state[k]
@@ -167,13 +175,23 @@ with st.sidebar:
 
     mode = st.radio(
         "Mode",
-        ["Explain", "Quiz", "Practice", "Flashcards"],
+        ["Explain", "Quiz", "Practice", "Flashcards", "Mock Exam"],
         key="mode_radio",
     )
 
     num_questions = st.slider("Number of questions / cards", 3, 10, 5)
+    exam_minutes = 30
+    if mode == "Mock Exam":
+        exam_minutes = st.number_input(
+            "Time limit (minutes)", min_value=5, max_value=180, value=30, step=5,
+            help="A soft limit: the clock runs, but you can still submit when it hits zero.",
+        )
 
-    can_start = bool(topic.strip()) or bool(uploaded_files)
+    folder_has_files = (not uploaded_files) and Path(notes_folder).expanduser().is_dir() and any(
+        p.suffix.lower() in NotesLoader.SUPPORTED_EXTENSIONS
+        for p in Path(notes_folder).expanduser().rglob("*")
+    )
+    can_start = bool(topic.strip()) or bool(uploaded_files) or folder_has_files
     start_btn = st.button(
         "▶ Start Session", type="primary", use_container_width=True,
         disabled=api_key_missing or not can_start,
@@ -184,15 +202,17 @@ with st.sidebar:
         with st.spinner("Loading notes..."):
             ctx, report = load_notes(notes_folder, topic, uploaded_files)
         st.session_state.topic = topic_label(topic, report)
+        st.session_state.broad_topic = not topic.strip()
         st.session_state.notes_report = report
         st.session_state.context = ctx
         st.session_state.mode = mode
+        st.session_state.exam_minutes = int(exam_minutes)
         st.session_state.notes_loaded = True
         st.session_state.session_started = True
         st.rerun()
 
     if not can_start:
-        st.caption("Enter a topic, or upload notes to study everything in them.")
+        st.caption("Enter a topic, upload notes, or point to a notes folder.")
 
     st.divider()
     if st.button("🔄 Reset", use_container_width=True):
@@ -305,7 +325,15 @@ with tab_study:
 
         # First message — auto-generate explanation
         if not st.session_state.chat_history:
-            first_user = {"role": "user", "content": f"Topic: {topic}"}
+            if st.session_state.broad_topic:
+                first_text = (
+                    "These are all my notes for the course. Don't explain everything at once. "
+                    "Give me a short roadmap of the themes in teaching order, naming the files for each, "
+                    "then teach only the first theme and end with a checking question."
+                )
+            else:
+                first_text = f"Topic: {topic}"
+            first_user = {"role": "user", "content": first_text}
             st.session_state.chat_history = [first_user]
 
             with st.chat_message("assistant"):
@@ -490,6 +518,122 @@ with tab_study:
                         st.session_state.quiz_evaluations.append(result["feedback"])
                         st.session_state.quiz_scores.append(result["score"])
                         st.rerun()
+
+    # -----------------------------------------------------------------------
+    # MOCK EXAM MODE
+    # -----------------------------------------------------------------------
+    elif mode == "Mock Exam":
+        tutor = get_tutor()
+
+        if not st.session_state.exam_questions:
+            with st.spinner(f"Writing a {num_questions}-question exam from your notes..."):
+                st.session_state.exam_questions = tutor.generate_exam_questions(context, num_questions)
+            st.session_state.exam_started_at = time.time()
+            st.rerun()
+
+        exam_qs = st.session_state.exam_questions
+        results = st.session_state.exam_results
+        limit_s = st.session_state.exam_minutes * 60
+
+        if results is None:
+            # ---- Taking the exam ----
+            started = st.session_state.exam_started_at
+
+            @st.fragment(run_every=1)
+            def exam_clock():
+                remaining = limit_s - (time.time() - started)
+                if remaining > 0:
+                    m, sec = divmod(int(remaining), 60)
+                    st.metric("Time remaining", f"{m:02d}:{sec:02d}")
+                else:
+                    st.error("Time is up. Finish your thought and submit; in the real exam you would stop here.")
+
+            exam_clock()
+            st.caption(
+                f"{len(exam_qs)} questions, closed book. Write full answers as you would on paper. "
+                "Answers are marked when you submit."
+            )
+            st.divider()
+
+            for i, q in enumerate(exam_qs):
+                st.markdown(f"**Q{i + 1}.** {q['question']}")
+                st.caption(f"Topic area: {q['area']}")
+                st.text_area(
+                    "Your answer", key=f"exam_ans_{i}", height=140,
+                    label_visibility="collapsed", placeholder="Write your answer here...",
+                )
+
+            if st.button("Submit exam", type="primary"):
+                answers = [st.session_state.get(f"exam_ans_{i}", "") for i in range(len(exam_qs))]
+                if not any(a.strip() for a in answers):
+                    st.warning("Write at least one answer before submitting.")
+                else:
+                    elapsed = time.time() - started
+                    try:
+                        with st.spinner("Marking your exam..."):
+                            graded = tutor.grade_exam(exam_qs, answers, context)
+                    except Exception as exc:
+                        st.error(f"Marking failed ({exc}). Your answers are still here, so try submitting again.")
+                    else:
+                        weighted = sum(g["score"] for g in graded)
+                        progress.record_session(topic, "mock exam", score=weighted, total=2 * len(exam_qs))
+                        st.session_state.exam_results = {
+                            "answers": answers, "graded": graded, "elapsed": elapsed,
+                        }
+                        st.rerun()
+
+        else:
+            # ---- Results ----
+            graded = results["graded"]
+            n = len(exam_qs)
+            weighted = sum(g["score"] for g in graded)
+            pct = round(weighted / (2 * n) * 100) if n else 0
+            full = sum(1 for g in graded if g["score"] == 2)
+            elapsed = int(results["elapsed"])
+            over = elapsed - limit_s
+
+            st.subheader("Exam marked")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Score", f"{pct}%")
+            c2.metric("Full marks", f"{full} of {n}")
+            c3.metric(
+                "Time used",
+                f"{elapsed // 60}m {elapsed % 60:02d}s",
+                delta=f"{over // 60}m over" if over > 0 else None,
+                delta_color="inverse",
+            )
+
+            if pct >= 80:
+                st.success("Strong result. Keep the weak areas below ticking over and you're in good shape.")
+            elif pct >= 50:
+                st.warning("A decent base. The weak areas below are where the marks are.")
+            else:
+                st.error("Plenty of room to improve. Work through the weak areas below, then retake.")
+
+            st.divider()
+            st.subheader("Where to focus")
+            by_area = {}
+            for q, g in zip(exam_qs, graded):
+                by_area.setdefault(q["area"], []).append(g["score"])
+            ranked = sorted(by_area.items(), key=lambda kv: sum(kv[1]) / (2 * len(kv[1])))
+            for area, scores in ranked:
+                area_pct = round(sum(scores) / (2 * len(scores)) * 100)
+                st.progress(area_pct / 100, text=f"{area}: {area_pct}% ({len(scores)} question{'s' if len(scores) != 1 else ''})")
+
+            st.divider()
+            st.subheader("Review")
+            for i, (q, ans, g) in enumerate(zip(exam_qs, results["answers"], graded)):
+                icon = "✅" if g["score"] == 2 else ("⚠️" if g["score"] == 1 else "❌")
+                with st.expander(f"{icon} Q{i + 1} ({q['area']}): {q['question'][:70]}..."):
+                    st.markdown(f"**Question:** {q['question']}")
+                    st.markdown(f"**Your answer:** {ans.strip() or '_(no answer)_'}")
+                    st.markdown(f"**Marker's feedback:** {g['feedback']}")
+
+            if st.button("🔄 New mock exam"):
+                for k in ["exam_questions", "exam_started_at", "exam_results"]:
+                    del st.session_state[k]
+                _init_state()
+                st.rerun()
 
     # -----------------------------------------------------------------------
     # FLASHCARDS MODE

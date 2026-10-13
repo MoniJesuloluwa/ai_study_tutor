@@ -1,4 +1,5 @@
 import os
+import re
 from typing import List, Dict, Generator
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -18,6 +19,10 @@ When explaining a topic:
 2. After your explanation, always end with a checking question to test the student's understanding. Something like "Can you tell me in your own words what X means?" or "What do you think would happen if Y?"
 3. When the student responds, evaluate their understanding — acknowledge what is correct, gently correct misconceptions, and deepen the explanation based on their gaps.
 4. Adapt your language and depth to how the student is responding.
+
+Pacing rules:
+- Keep each reply focused: roughly 350 words at most, covering ONE chunk. Never try to cover everything in a single reply.
+- If the notes span several themes (or the student asks for everything), open with a short roadmap: 3-5 themes in teaching order, naming which documents cover each. Then teach only the first theme and end with a checking question. After the student answers, move on to the next theme.
 
 You have access to the student's personal study notes. Use them as the primary source. If you supplement with general knowledge, say so explicitly."""
 
@@ -52,6 +57,21 @@ Create flashcards that:
 Format each flashcard as:
 Q: [question]
 A: [answer]"""
+
+_CUT_OFF_NOTE = "\n\n*(That reply hit the length limit. Type **continue** and I'll pick up where I left off.)*"
+
+_EXAM_SYSTEM = """You are a university examiner writing and marking a closed-book written exam from the student's course notes.
+
+When writing questions:
+- Spread them across the whole of the notes, not just the first document.
+- Mix types: short definitions, "explain why", compare/contrast, and applied scenarios.
+- Order them from easier to harder.
+- Questions must be answerable from the notes.
+
+When marking:
+- Be strict but fair, like a real marker. Vague or hand-wavy answers do not earn full marks.
+- 2 = complete and accurate, 1 = partly right or missing key points, 0 = wrong or no answer.
+- Feedback states what was missing or wrong and gives the key points of a model answer in 1-3 sentences."""
 
 
 class Tutor:
@@ -103,12 +123,14 @@ class Tutor:
         ]
         with self.client.messages.stream(
             model=self.model,
-            max_tokens=1200,
+            max_tokens=4000,
             thinking={"type": "adaptive"},
             system=system,
             messages=messages,
         ) as stream:
             yield from stream.text_stream
+            if stream.get_final_message().stop_reason == "max_tokens":
+                yield _CUT_OFF_NOTE
 
     def explain(self, topic: str, context: str, history: List[Dict]) -> str:
         """Non-streaming version for CLI."""
@@ -118,7 +140,7 @@ class Tutor:
         ]
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=1200,
+            max_tokens=4000,
             thinking={"type": "adaptive"},
             system=system,
             messages=messages,
@@ -183,7 +205,7 @@ class Tutor:
         )
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=600,
+            max_tokens=1500,
             thinking={"type": "adaptive"},
             system=system,
             messages=[{"role": "user", "content": prompt}],
@@ -222,12 +244,14 @@ class Tutor:
         ]
         with self.client.messages.stream(
             model=self.model,
-            max_tokens=800,
+            max_tokens=2000,
             thinking={"type": "adaptive"},
             system=system,
             messages=messages,
         ) as stream:
             yield from stream.text_stream
+            if stream.get_final_message().stop_reason == "max_tokens":
+                yield _CUT_OFF_NOTE
 
     def practice(self, topic: str, context: str, history: List[Dict]) -> str:
         """Non-streaming practice turn for CLI."""
@@ -237,7 +261,7 @@ class Tutor:
         ]
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=800,
+            max_tokens=2000,
             thinking={"type": "adaptive"},
             system=system,
             messages=messages,
@@ -279,3 +303,78 @@ class Tutor:
         if not cards:
             cards.append({"question": "Flashcards", "answer": raw})
         return cards
+
+    # ------------------------------------------------------------------
+    # Mock exam — timed, mixed questions graded in a single call
+    # ------------------------------------------------------------------
+
+    def _complete(self, system: list, prompt: str, max_tokens: int, thinking: bool = False) -> str:
+        kwargs = {"thinking": {"type": "adaptive"}} if thinking else {}
+        with self.client.messages.stream(
+            model=self.model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+            **kwargs,
+        ) as stream:
+            message = stream.get_final_message()
+        return next(b.text for b in message.content if b.type == "text")
+
+    def generate_exam_questions(self, context: str, num: int = 8) -> List[Dict[str, str]]:
+        """Returns [{"area": str, "question": str}] covering the notes broadly."""
+        system = self._system_with_notes(_EXAM_SYSTEM, context)
+        prompt = (
+            f"Write exactly {num} written exam questions from the notes. "
+            "Format every question on its own line as:\n"
+            "N. [Area] question text\n"
+            "where Area is a 1-4 word name for the topic area it tests. "
+            "Questions only, no answers."
+        )
+        raw = self._complete(system, prompt, max_tokens=300 + 200 * num)
+        return self._parse_exam_questions(raw, num)
+
+    def _parse_exam_questions(self, raw: str, num: int) -> List[Dict[str, str]]:
+        items: List[Dict[str, str]] = []
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            match = re.match(r"^\d+[.)]\s*(?:\[([^\]]+)\]\s*)?(.+)$", line)
+            if match:
+                items.append({"area": (match.group(1) or "General").strip(), "question": match.group(2).strip()})
+            elif line and items:
+                items[-1]["question"] += " " + line
+        return items[:num] if items else [{"area": "General", "question": raw.strip()}]
+
+    def grade_exam(
+        self,
+        questions: List[Dict[str, str]],
+        answers: List[str],
+        context: str,
+    ) -> List[Dict]:
+        """Marks all answers in one call. Returns [{"score": 0|1|2, "feedback": str}]."""
+        system = self._system_with_notes(_EXAM_SYSTEM, context)
+        blocks = []
+        for i, (q, a) in enumerate(zip(questions, answers), start=1):
+            blocks.append(f"### Q{i}\nQuestion: {q['question']}\nStudent answer: {a.strip() or '(no answer given)'}")
+        prompt = (
+            "Mark this exam. For every question output exactly:\n"
+            "### Q<number>\nSCORE: <0, 1 or 2>\nFEEDBACK: <feedback>\n\n"
+            "Mark all questions, in order.\n\n" + "\n\n".join(blocks)
+        )
+        raw = self._complete(system, prompt, max_tokens=2000 + 500 * len(questions), thinking=True)
+        return self._parse_grades(raw, len(questions))
+
+    def _parse_grades(self, raw: str, count: int) -> List[Dict]:
+        results = [{"score": 0, "feedback": "This question could not be marked."} for _ in range(count)]
+        for chunk in re.split(r"(?m)^#+\s*Q(?=\d+)", raw)[1:]:
+            number = re.match(r"(\d+)", chunk)
+            score = re.search(r"SCORE:\s*([012])", chunk)
+            feedback = re.search(r"FEEDBACK:\s*(.+)", chunk, re.S)
+            if not number or not score:
+                continue
+            idx = int(number.group(1)) - 1
+            if 0 <= idx < count:
+                results[idx] = {
+                    "score": int(score.group(1)),
+                    "feedback": feedback.group(1).strip() if feedback else "",
+                }
+        return results

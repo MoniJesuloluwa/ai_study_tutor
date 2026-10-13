@@ -22,16 +22,19 @@ Replaced OpenAI with **Anthropic's Claude** (`claude-opus-4-7`) with adaptive th
 ### The Tutor Actually Teaches Now
 Each mode was rebuilt around the **Socratic method**:
 
-- **Explain** — after explaining a concept, the tutor always ends with a checking question. When the student responds, it evaluates their understanding, corrects misconceptions, and adapts the depth of the next explanation accordingly. Fully multi-turn.
+- **Explain** — after explaining a concept, the tutor always ends with a checking question. When the student responds, it evaluates their understanding, corrects misconceptions, and adapts the depth of the next explanation accordingly. Fully multi-turn. Replies are paced one chunk at a time; with a blank topic over a large set of notes, it opens with a roadmap of themes (naming the files for each) and teaches them in order instead of dumping everything at once.
 - **Quiz** — questions test genuine understanding, not just recall. Each answer is evaluated by Claude and returned with a score (`correct / partial / incorrect`), specific feedback on what was right and wrong, and the correct understanding explained before moving on.
 - **Practice** — a Socratic dialogue where the tutor guides the student to answers through probing questions rather than giving them directly. Hints are progressive and only given when the student is genuinely stuck.
 - **Flashcards** — generated from notes, testing understanding over memorisation.
+- **Mock Exam** — a timed, closed-book written exam drawn from across all your notes (definitions, compare/contrast, applied scenarios). You write full answers, submit once, and get marked like an examiner would: a score, a per-topic breakdown showing where to focus, and feedback with the key points of a model answer for every question.
 
 ### Streamlit Dashboard
 Built out from an empty file into a full interactive app:
 - Sidebar with drag-and-drop upload (PDF, PowerPoint, text, Markdown), plus topic, mode, and number of questions/cards
 - Instant upload feedback: files read, and unreadable files (e.g. scanned PDFs) called out by name
-- Topic is optional — leave it blank to study everything you uploaded
+- Topic is optional — leave it blank to study everything you uploaded, or point at a notes folder and start without typing a topic
+- Mock Exam mode with a live countdown, a score, a weak-topic breakdown, and per-question marker feedback
+- If a reply ever hits the length limit it says so, and you can type "continue" to pick up where it stopped
 - Clear on-screen message if the API key is missing, instead of a traceback
 - Chat interface for Explain and Practice modes with streaming responses
 - One-question-at-a-time quiz flow with colour-coded feedback
@@ -86,7 +89,7 @@ python main.py flashcards --topic "photosynthesis" --num 10
 
 Supported formats: `.pdf`, `.pptx` (slide text, tables, and speaker notes), `.txt`, and `.md`.
 
-- **Dashboard:** upload one or more files directly from the sidebar. If nothing is uploaded, it falls back to the notes folder (default `data/notes/`). Leave the topic blank to study everything you uploaded. Files with no readable text (e.g. scanned PDFs) are flagged instead of being skipped silently.
+- **Dashboard:** upload one or more files directly from the sidebar. If nothing is uploaded, it falls back to the notes folder (default `data/notes/`; any folder path works, e.g. `~/Documents/My Course`). Leave the topic blank to study everything you loaded. Files with no readable text (e.g. scanned PDFs) are flagged instead of being skipped silently.
 - **CLI:** reads from `--notes-folder` (default `data/notes/`).
 
 The tutor uses your notes as the primary source and supplements with general knowledge only when needed.
@@ -100,3 +103,12 @@ The amount of notes sent to Claude is `MAX_CONTEXT_CHARS` in `core/knowledge_bas
 - It is a ceiling, not a target: notes with no match for your topic are skipped, so most sessions send far less.
 - Notes are cached between turns, which cuts repeat cost, but the cache expires after about 5 minutes of inactivity.
 - If a deck is scanned or image-only, no text can be extracted. Run it through OCR first.
+
+## Preparing for an exam
+
+A workflow that works well with a set of lecture slides and readings:
+
+1. **Learn:** run Explain with the topic blank and answer each checking question in writing. The tutor walks through the themes in order.
+2. **Check:** run Quiz on each theme and note anything marked partial or incorrect.
+3. **Test:** run Mock Exam across everything, closed book and timed, then use the "Where to focus" list to decide what to revisit with Practice or Explain.
+4. **Repeat:** each new mock exam generates fresh questions, so retake it and compare scores.
